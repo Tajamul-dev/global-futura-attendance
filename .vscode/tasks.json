@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start Vite Dev Server",
+      "type": "npm",
+      "script": "dev",
+      "isBackground": true,
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Typecheck TypeScript",
+      "type": "npm",
+      "script": "typecheck",
+      "problemMatcher": ["$tsc"]
+    }
+  ]
+}
