@@ -1,6 +1,7 @@
 import { Employee, AttendanceRecord, BreakRecord, StatusDeclaration, LeaveRequest, CompanyHoliday } from './types';
 import { v4 as uuidv4 } from 'uuid';
 
+const INITIALIZED_KEY = 'attendance_initialized_v1';
 const EMPLOYEES_KEY = 'attendance_employees';
 const RECORDS_KEY = 'attendance_records';
 const CURRENT_USER_KEY = 'attendance_current_user';
@@ -8,17 +9,101 @@ const STATUS_DECLARATIONS_KEY = 'attendance_status_declarations';
 const LEAVE_REQUESTS_KEY = 'attendance_leave_requests';
 const HOLIDAYS_KEY = 'attendance_holidays';
 
+// Fallback memory store for strict mobile private browsing / embedded webviews
+const memoryFallback = new Map<string, string>();
+
+function storageGet(key: string): string | null {
+  try {
+    const val = localStorage.getItem(key);
+    if (val !== null) return val;
+  } catch {
+    // Ignore storage access errors
+  }
+  return memoryFallback.get(key) ?? null;
+}
+
+function storageSet(key: string, value: string) {
+  memoryFallback.set(key, value);
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore quota/private mode errors
+  }
+}
+
+function storageRemove(key: string) {
+  memoryFallback.delete(key);
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
 function notifyStoreUpdate() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('attendance-store-updated'));
   }
 }
 
-// Initialize store with demo accounts
-export function initializeStore() {
-  const employees = getEmployees();
-  if (employees.length === 0) {
-    const admin: Employee = {
+// Optional cross-device sync when hosted with backend /api/store
+let isSyncingFromServer = false;
+
+export async function syncFromServer(): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+  try {
+    const res = await fetch('/api/store', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data || typeof data !== 'object') return false;
+
+    isSyncingFromServer = true;
+    if (Array.isArray(data.employees) && data.employees.length > 0) {
+      storageSet(EMPLOYEES_KEY, JSON.stringify(data.employees));
+      storageSet(INITIALIZED_KEY, 'true');
+    }
+    if (Array.isArray(data.records)) {
+      storageSet(RECORDS_KEY, JSON.stringify(data.records));
+    }
+    if (Array.isArray(data.statusDeclarations)) {
+      storageSet(STATUS_DECLARATIONS_KEY, JSON.stringify(data.statusDeclarations));
+    }
+    if (Array.isArray(data.leaveRequests)) {
+      storageSet(LEAVE_REQUESTS_KEY, JSON.stringify(data.leaveRequests));
+    }
+    if (Array.isArray(data.holidays)) {
+      storageSet(HOLIDAYS_KEY, JSON.stringify(data.holidays));
+    }
+    isSyncingFromServer = false;
+    notifyStoreUpdate();
+    return true;
+  } catch {
+    isSyncingFromServer = false;
+    return false;
+  }
+}
+
+function pushToServer() {
+  if (typeof window === 'undefined' || isSyncingFromServer) return;
+  const payload = {
+    employees: getEmployeesRaw(),
+    records: getRecords(),
+    statusDeclarations: getStatusDeclarations(),
+    leaveRequests: getLeaveRequests(),
+    holidays: getHolidays(),
+  };
+  fetch('/api/store', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).catch(() => {
+    // Gracefully ignore when running as static frontend-only Vite app
+  });
+}
+
+function createDefaultEmployees(): Employee[] {
+  return [
+    {
       id: uuidv4(),
       name: 'Global Futura Admin',
       email: 'admin@globalfutura.com',
@@ -26,8 +111,8 @@ export function initializeStore() {
       role: 'admin',
       department: 'Management',
       createdAt: new Date().toISOString(),
-    };
-    const emp1: Employee = {
+    },
+    {
       id: uuidv4(),
       name: 'John Smith',
       email: 'john@globalfutura.com',
@@ -35,8 +120,8 @@ export function initializeStore() {
       role: 'employee',
       department: 'Operations',
       createdAt: new Date().toISOString(),
-    };
-    const emp2: Employee = {
+    },
+    {
       id: uuidv4(),
       name: 'Sarah Johnson',
       email: 'sarah@globalfutura.com',
@@ -44,30 +129,61 @@ export function initializeStore() {
       role: 'employee',
       department: 'Distribution',
       createdAt: new Date().toISOString(),
-    };
-    saveEmployees([admin, emp1, emp2]);
+    },
+  ];
+}
+
+function getEmployeesRaw(): Employee[] {
+  const data = storageGet(EMPLOYEES_KEY);
+  if (!data) return [];
+  try {
+    return JSON.parse(data);
+  } catch {
+    return [];
   }
 }
 
+// Initialize store with demo accounts and pull latest shared state if available
+export function initializeStore() {
+  const existing = getEmployeesRaw();
+  if (existing.length === 0 && !storageGet(INITIALIZED_KEY)) {
+    const defaults = createDefaultEmployees();
+    storageSet(EMPLOYEES_KEY, JSON.stringify(defaults));
+    storageSet(INITIALIZED_KEY, 'true');
+  }
+  void syncFromServer();
+}
+
 export function resetDemoStore() {
-  localStorage.removeItem(EMPLOYEES_KEY);
-  localStorage.removeItem(RECORDS_KEY);
-  localStorage.removeItem(CURRENT_USER_KEY);
-  localStorage.removeItem(STATUS_DECLARATIONS_KEY);
-  localStorage.removeItem(LEAVE_REQUESTS_KEY);
-  localStorage.removeItem(HOLIDAYS_KEY);
-  initializeStore();
+  storageRemove(INITIALIZED_KEY);
+  storageRemove(EMPLOYEES_KEY);
+  storageRemove(RECORDS_KEY);
+  storageRemove(CURRENT_USER_KEY);
+  storageRemove(STATUS_DECLARATIONS_KEY);
+  storageRemove(LEAVE_REQUESTS_KEY);
+  storageRemove(HOLIDAYS_KEY);
+  const defaults = createDefaultEmployees();
+  storageSet(EMPLOYEES_KEY, JSON.stringify(defaults));
+  storageSet(INITIALIZED_KEY, 'true');
+  pushToServer();
   notifyStoreUpdate();
 }
 
 // Employees
 export function getEmployees(): Employee[] {
-  const data = localStorage.getItem(EMPLOYEES_KEY);
-  return data ? JSON.parse(data) : [];
+  let list = getEmployeesRaw();
+  if (list.length === 0 && !storageGet(INITIALIZED_KEY)) {
+    list = createDefaultEmployees();
+    storageSet(EMPLOYEES_KEY, JSON.stringify(list));
+    storageSet(INITIALIZED_KEY, 'true');
+  }
+  return list;
 }
 
 export function saveEmployees(employees: Employee[]) {
-  localStorage.setItem(EMPLOYEES_KEY, JSON.stringify(employees));
+  storageSet(EMPLOYEES_KEY, JSON.stringify(employees));
+  storageSet(INITIALIZED_KEY, 'true');
+  pushToServer();
   notifyStoreUpdate();
 }
 
@@ -75,6 +191,10 @@ export function addEmployee(employee: Omit<Employee, 'id' | 'createdAt'>): Emplo
   const employees = getEmployees();
   const newEmployee: Employee = {
     ...employee,
+    name: employee.name.trim(),
+    email: employee.email.trim().toLowerCase(),
+    password: employee.password.trim(),
+    department: employee.department.trim(),
     id: uuidv4(),
     createdAt: new Date().toISOString(),
   };
@@ -88,36 +208,79 @@ export function deleteEmployee(id: string) {
   saveEmployees(employees);
 }
 
-// Authentication
+function matchesEmployeeCredentials(emp: Employee, rawEmail: string, rawPassword: string): boolean {
+  const normalizedEmail = rawEmail.trim().toLowerCase();
+  const empEmail = emp.email.trim().toLowerCase();
+  if (empEmail !== normalizedEmail) return false;
+
+  const cleanPass = rawPassword.trim();
+  const storedPass = emp.password.trim();
+
+  // Exact match
+  if (storedPass === cleanPass) return true;
+
+  // Handle mobile keyboard auto-capitalizing the first character of the password
+  if (cleanPass.length > 0) {
+    const decapitalizedFirst = cleanPass.charAt(0).toLowerCase() + cleanPass.slice(1);
+    if (storedPass === decapitalizedFirst) return true;
+  }
+
+  return false;
+}
+
+// Synchronous login with mobile keyboard normalization
 export function login(email: string, password: string): Employee | null {
   const employees = getEmployees();
-  const employee = employees.find(e => e.email === email && e.password === password);
+  const employee = employees.find(e => matchesEmployeeCredentials(e, email, password));
   if (employee) {
-    localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(employee));
+    storageSet(CURRENT_USER_KEY, JSON.stringify(employee));
     notifyStoreUpdate();
     return employee;
   }
   return null;
 }
 
+// Async login that syncs cross-device accounts from server if local lookup misses
+export async function loginWithSync(email: string, password: string): Promise<Employee | null> {
+  const immediate = login(email, password);
+  if (immediate) return immediate;
+
+  const synced = await syncFromServer();
+  if (synced) {
+    return login(email, password);
+  }
+  return null;
+}
+
 export function logout() {
-  localStorage.removeItem(CURRENT_USER_KEY);
+  storageRemove(CURRENT_USER_KEY);
   notifyStoreUpdate();
 }
 
 export function getCurrentUser(): Employee | null {
-  const data = localStorage.getItem(CURRENT_USER_KEY);
-  return data ? JSON.parse(data) : null;
+  const data = storageGet(CURRENT_USER_KEY);
+  if (!data) return null;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
 }
 
 // Attendance Records
 export function getRecords(): AttendanceRecord[] {
-  const data = localStorage.getItem(RECORDS_KEY);
-  return data ? JSON.parse(data) : [];
+  const data = storageGet(RECORDS_KEY);
+  if (!data) return [];
+  try {
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
 }
 
 export function saveRecords(records: AttendanceRecord[]) {
-  localStorage.setItem(RECORDS_KEY, JSON.stringify(records));
+  storageSet(RECORDS_KEY, JSON.stringify(records));
+  pushToServer();
   notifyStoreUpdate();
 }
 
@@ -216,12 +379,18 @@ export function getEmployeeRecords(employeeId: string): AttendanceRecord[] {
 
 // Status Declarations
 export function getStatusDeclarations(): StatusDeclaration[] {
-  const data = localStorage.getItem(STATUS_DECLARATIONS_KEY);
-  return data ? JSON.parse(data) : [];
+  const data = storageGet(STATUS_DECLARATIONS_KEY);
+  if (!data) return [];
+  try {
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
 }
 
 export function saveStatusDeclarations(declarations: StatusDeclaration[]) {
-  localStorage.setItem(STATUS_DECLARATIONS_KEY, JSON.stringify(declarations));
+  storageSet(STATUS_DECLARATIONS_KEY, JSON.stringify(declarations));
+  pushToServer();
   notifyStoreUpdate();
 }
 
@@ -300,12 +469,18 @@ export function getEmployeeWorkDays(employeeId: string): {
 
 // Leave Requests
 export function getLeaveRequests(): LeaveRequest[] {
-  const data = localStorage.getItem(LEAVE_REQUESTS_KEY);
-  return data ? JSON.parse(data) : [];
+  const data = storageGet(LEAVE_REQUESTS_KEY);
+  if (!data) return [];
+  try {
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
 }
 
 export function saveLeaveRequests(requests: LeaveRequest[]) {
-  localStorage.setItem(LEAVE_REQUESTS_KEY, JSON.stringify(requests));
+  storageSet(LEAVE_REQUESTS_KEY, JSON.stringify(requests));
+  pushToServer();
   notifyStoreUpdate();
 }
 
@@ -361,12 +536,18 @@ export function getEmployeeLeaveRequests(employeeId: string): LeaveRequest[] {
 
 // Company Holidays
 export function getHolidays(): CompanyHoliday[] {
-  const data = localStorage.getItem(HOLIDAYS_KEY);
-  return data ? JSON.parse(data) : [];
+  const data = storageGet(HOLIDAYS_KEY);
+  if (!data) return [];
+  try {
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
 }
 
 export function saveHolidays(holidays: CompanyHoliday[]) {
-  localStorage.setItem(HOLIDAYS_KEY, JSON.stringify(holidays));
+  storageSet(HOLIDAYS_KEY, JSON.stringify(holidays));
+  pushToServer();
   notifyStoreUpdate();
 }
 
